@@ -1,4 +1,8 @@
+# LLM backends. Anthropic and OpenRouter (via its OpenAI-compatible API) are both
+# supported; text_to_sql.py picks one and only one of them per call.
 anthropic>=1.0.0
+openai>=1.0.0
+
 streamlit>=1.36.0
 pandas>=2.0.0
 numpy>=1.24.0

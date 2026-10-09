@@ -28,7 +28,7 @@ fresh process before debugging further, then restart.
 
 ```
 app.py (Streamlit UI)
-  -> text_to_sql.generate_sql()   question + schema -> Claude -> raw SQL
+  -> text_to_sql.generate_sql()   question + schema -> LLM -> raw SQL
   -> db.validate_sql()            reject anything that isn't a single SELECT
   -> db.execute_query()           read-only SQLite connection -> pandas DataFrame
 ```
@@ -42,8 +42,12 @@ app.py (Streamlit UI)
   translations of them (asked for "Schweiz", it used to emit
   `country IN ('Switzerland','Schweiz','CH','Suisse','Svizzera')`). Add a column
   there when its values are a small fixed set.
-- **`text_to_sql.py`** — the only module that calls the Claude API. Holds the system
-  prompt and response parsing.
+- **`text_to_sql.py`** — the only module that calls an LLM. Holds the system prompt
+  and response parsing, behind **two providers**: `anthropic` (Anthropic SDK) and
+  `openrouter` (OpenAI SDK pointed at OpenRouter's `base_url`). Both take the same
+  system prompt and return raw text, so `generate_sql` is the only seam. Provider
+  and model are resolved **per call** by `active_provider()` / `active_model()`,
+  never at import — see the deployment note below for why that matters.
 - **`speech.py`** — the only module that does speech-to-text. Loads a local
   faster-whisper model lazily and holds it in a module-level singleton, because
   Streamlit reruns the script on every interaction and reloading per run would be
@@ -108,14 +112,39 @@ something destructive. Two guards, both in `db.py`, and both must stay in place:
    message instead of a driver-level failure. Do not replace the read-only connection
    with a normal one, and do not treat validation as sufficient on its own.
 
-## Claude API notes
+## Deployment (Streamlit Community Cloud)
 
-- Model defaults to `claude-opus-5-5` (overridable via `CLAUDE_MODEL`). Thinking is
-  always on for this model, so responses contain thinking blocks alongside the text
-  block — `generate_sql` collects `text` blocks only. Do not assume `content[0]` is text.
-- `output_config={"effort": ...}` (default `low`, via `CLAUDE_EFFORT`) controls reasoning
-  depth. Effort level is the only way to tune thinking depth here; `budget_tokens` is
-  rejected on this model.
+The app deploys as-is, but three facts about that environment explain code that
+otherwise looks redundant:
+
+- **`ecommerce.db` is gitignored, so a deployment has no database.** `app.py` seeds
+  it on first start instead of telling the user to run `seed_db.py`. Do not replace
+  that with a static failure — it would break every deployment.
+- **Secrets arrive as `st.secrets`, not as environment variables.** The core modules
+  read `os.environ` (that is what keeps them Streamlit-free), so `app.py` bridges
+  the two via `bridge_secrets`. Because of that bridge, environment-derived defaults
+  must be read *after* it runs, and provider/model resolution must stay lazy.
+  `st.secrets` is **lazy**: touching it succeeds and only iterating raises when no
+  secrets are configured, so `_cloud_secrets` reads inside its `try`.
+- **Transcription runs on the server** with no GPU and little memory: set
+  `WHISPER_MODEL=tiny` there. `faster-whisper` is the slow part of the build.
+
+## LLM provider notes
+
+- Two providers, chosen by `active_provider()`: `LLM_PROVIDER` if set, else
+  OpenRouter when `OPENROUTER_API_KEY` exists, else Anthropic. `active_model()`
+  returns the matching model id. Keep both paths working — the app is meant to be
+  portable, and that is the point of having two.
+- OpenRouter is reached through its OpenAI-compatible endpoint (`openai` SDK with a
+  different `base_url`), `temperature=0.0` for reproducible SQL, and a
+  `finish_reason == "length"` check that Anthropic does not need.
+- Anthropic-specific: model defaults to `claude-opus-5-5` (overridable via
+  `CLAUDE_MODEL`). Thinking is always on for this model, so responses contain
+  thinking blocks alongside the text block — collect `text` blocks only. Do not
+  assume `content[0]` is text.
+- Anthropic-specific: `output_config={"effort": ...}` (default `low`, via
+  `CLAUDE_EFFORT`) controls reasoning depth. Effort is the only way to tune thinking
+  depth here; `budget_tokens` is rejected on this model.
 - The SDK is `anthropic` 1.x. Refusal fallbacks are **not** enabled — they require the
   `client.beta.messages` path (`betas` is not a parameter of `messages.create`), and the
   workshop key may not have that beta. Ask before adding.

@@ -4,7 +4,7 @@ Run with::
 
     streamlit run app.py
 
-Three details worth knowing before editing this file:
+Details worth knowing before editing this file:
 
 - The UI-language radio is rendered first, because every string below it comes
   from the dict it selects.
@@ -16,15 +16,19 @@ Three details worth knowing before editing this file:
   recorder returns the same clip on every rerun, so without the cache each click
   would re-run the model; without the language in the key, switching language
   would keep serving the previous language's transcript.
+- ``_bridge_cloud_secrets()`` runs *before* the env-derived defaults below are
+  read, so a secret set in the deployment can still select the initial language.
 """
 
 from __future__ import annotations
 
 import os
+from typing import Any, Mapping, MutableMapping
 
 import pandas as pd
 import streamlit as st
 
+import seed_db
 import speech
 from charts import pick_chart
 from db import (
@@ -35,7 +39,52 @@ from db import (
     get_schema_text,
 )
 from i18n import EXAMPLES, STRINGS, UI_LANGUAGES
-from text_to_sql import DEFAULT_MODEL, generate_sql
+from text_to_sql import (
+    OPENROUTER,
+    active_model,
+    active_provider,
+    generate_sql,
+)
+
+# The page config has to be the first Streamlit call in the script.
+st.set_page_config(page_title="Voice-to-SQL Dashboard", page_icon="🔎", layout="wide")
+
+
+def bridge_secrets(
+    secrets: Mapping[str, Any], environ: MutableMapping[str, str] | None = None
+) -> int:
+    """Copy string secrets into the environment and return how many were added.
+
+    The core modules read configuration from ``os.environ`` so that they stay free
+    of Streamlit imports and testable from a plain script. A deployment, though,
+    supplies its settings through ``st.secrets``. This is where the two meet.
+
+    Existing environment variables win: the shell that launched the app was set
+    deliberately, and a leftover secret should not silently override it.
+    """
+    environ = os.environ if environ is None else environ
+    added = 0
+    for key, value in secrets.items():
+        if isinstance(value, str) and key not in environ:
+            environ[key] = value
+            added += 1
+    return added
+
+
+def _cloud_secrets() -> Mapping[str, Any]:
+    """Return the deployment's secrets, or an empty mapping if there are none.
+
+    ``st.secrets`` is lazy: merely touching it succeeds, and the "no secrets
+    configured" error only fires on first access. The read therefore has to happen
+    *inside* the ``try`` — there are no secrets locally, which is the normal case.
+    """
+    try:
+        return dict(st.secrets.items())
+    except Exception:  # noqa: BLE001
+        return {}
+
+
+bridge_secrets(_cloud_secrets())
 
 # Initial selections; both are still changeable in the UI.
 DEFAULT_UI_LANG = os.environ.get("UI_LANGUAGE", "en")
@@ -51,8 +100,6 @@ STT_CHOICES: list[tuple[str, str]] = [
     ("English", "en"),
     ("Deutsch", "de"),
 ]
-
-st.set_page_config(page_title="Voice-to-SQL Dashboard", page_icon="🔎", layout="wide")
 
 
 @st.cache_data(show_spinner=False)
@@ -139,18 +186,31 @@ def main() -> None:
         st.title(t["title"])
         st.caption(t["subtitle"])
 
-    if not DB_PATH.exists():
-        st.error(t["db_missing"].format(name=DB_PATH.name))
-        st.code("python seed_db.py", language="bash")
+    try:
+        provider = active_provider()
+    except ValueError as exc:
+        st.error(t["error_generic"].format(error=exc))
         st.stop()
+
+    if not DB_PATH.exists():
+        # A deployment starts from a fresh checkout and ecommerce.db is gitignored,
+        # so build it here rather than failing with "run python seed_db.py".
+        try:
+            with st.spinner(t["seeding"]):
+                seed_db.seed()
+        except Exception as exc:  # noqa: BLE001 - report whatever the file system said
+            st.error(t["db_missing"].format(name=DB_PATH.name))
+            st.caption(t["seeding_failed"].format(error=exc))
+            st.stop()
 
     with st.sidebar:
         st.header(t["schema_header"])
         st.code(load_schema(), language="text")
         st.divider()
-        st.caption(t["model_label"].format(model=DEFAULT_MODEL))
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            st.caption(t["no_api_key"])
+        st.caption(t["model_label"].format(model=f"{active_model(provider)} · {provider}"))
+        key_var = "OPENROUTER_API_KEY" if provider == OPENROUTER else "ANTHROPIC_API_KEY"
+        if not os.environ.get(key_var):
+            st.caption(t["no_api_key"].format(var=key_var))
 
     # --- Voice input ------------------------------------------------------
     if speech.is_available():

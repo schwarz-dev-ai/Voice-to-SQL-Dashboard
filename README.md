@@ -8,8 +8,9 @@ chart when the result has numbers worth plotting.
 
 ```bash
 pip install -r requirements.txt
-python seed_db.py                     # creates ecommerce.db
-export ANTHROPIC_API_KEY=sk-ant-...   # Windows: set ANTHROPIC_API_KEY=...
+python seed_db.py                       # creates ecommerce.db
+export ANTHROPIC_API_KEY=sk-ant-...     # or OPENROUTER_API_KEY=sk-or-v1-...
+                                        # Windows: set ANTHROPIC_API_KEY=...
 streamlit run app.py
 ```
 
@@ -22,7 +23,7 @@ re-run whenever you want a clean dataset.
 | --- | --- |
 | `seed_db.py` | Creates and seeds `ecommerce.db` (customers, products, orders). |
 | `db.py` | Schema introspection, SQL validation, read-only execution. |
-| `text_to_sql.py` | Claude API call: question + schema -> SQL. |
+| `text_to_sql.py` | LLM call: question + schema -> SQL. Anthropic or OpenRouter. |
 | `speech.py` | Local speech-to-text (faster-whisper). |
 | `charts.py` | Decides which chart a result deserves. Pure logic, no Streamlit. |
 | `i18n.py` | UI strings and example questions, per language. |
@@ -101,13 +102,68 @@ produce a misleading graph:
 - key columns are ignored as measures, and a bare `id` is not used as an axis;
 - no chart for a single row, no numeric column, or more than 50 categories.
 
+## Choosing the LLM backend
+
+Two providers sit behind the same interface in `text_to_sql.py`:
+
+| Provider | Key | Default model |
+| --- | --- | --- |
+| `anthropic` | `ANTHROPIC_API_KEY` | `claude-opus-5-5` |
+| `openrouter` | `OPENROUTER_API_KEY` | `deepseek/deepseek-v4.1-flash` |
+
+`text_to_sql.active_provider()` decides per call: `LLM_PROVIDER` wins if set,
+otherwise OpenRouter is used when its key is present, otherwise Anthropic. Both
+paths are exercised by the app in exactly the same way — only the client differs,
+and OpenRouter is reached through its OpenAI-compatible endpoint, so the OpenAI SDK
+just gets a different `base_url`.
+
+OpenRouter also accepts a suffix on the model id: `deepseek/deepseek-v4.1-flash:nitro`
+picks the fastest upstream provider instead of the default routing.
+
+## Deployment
+
+The app is ready for Streamlit Community Cloud:
+
+1. On [share.streamlit.io](https://share.streamlit.io), create an app from this
+   repository, branch `main`, main file `app.py`.
+2. Under **Advanced settings → Secrets**, paste:
+
+   ```toml
+   OPENROUTER_API_KEY = "sk-or-v1-..."
+   OPENROUTER_MODEL = "deepseek/deepseek-v4.1-flash:nitro"
+   UI_LANGUAGE = "de"
+   WHISPER_MODEL = "tiny"
+   ```
+
+3. Deploy. The first build takes a few minutes — `faster-whisper` and the model
+   weights are the slow part.
+
+Three things worth knowing, all of which the app handles for you:
+
+- **The database is not in git.** `ecommerce.db` is gitignored, so a fresh
+  checkout has none. `app.py` therefore seeds it on first start instead of failing
+  with "run `python seed_db.py`".
+- **Cloud secrets are not environment variables.** Their values live in
+  `st.secrets`, while every core module reads `os.environ` (that is what keeps them
+  Streamlit-free). `app.py` copies the secrets into the environment at startup.
+- **Transcription runs on the server.** There is no GPU and little memory in a free
+  container, so set `WHISPER_MODEL=tiny` and expect the first transcription to be
+  slow while the weights download. Without `faster-whisper` the app still works —
+  it just falls back to typing.
+
+> **The app is public.** Anyone with the link spends your API credit, so set a
+> spending limit on the OpenRouter key before you share it.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `ANTHROPIC_API_KEY` | – | Required. |
-| `CLAUDE_MODEL` | `claude-opus-5-5` | Model used for translation. |
-| `CLAUDE_EFFORT` | `low` | Reasoning effort (`low`…`max`). |
+| `ANTHROPIC_API_KEY` | – | Key for the Anthropic backend. |
+| `OPENROUTER_API_KEY` | – | Key for the OpenRouter backend. Its presence selects OpenRouter. |
+| `LLM_PROVIDER` | auto | `anthropic` or `openrouter`; overrides the key-based choice. |
+| `CLAUDE_MODEL` | `claude-opus-5-5` | Model for the Anthropic backend. |
+| `OPENROUTER_MODEL` | `deepseek/deepseek-v4.1-flash` | Model for the OpenRouter backend. |
+| `CLAUDE_EFFORT` | `low` | Reasoning effort (`low`…`max`), Anthropic only. |
 | `UI_LANGUAGE` | `en` | Initial interface language (`en`/`de`). |
 | `WHISPER_MODEL` | `base` | `tiny` (fastest), `base`, `small`, `medium`, `large-v3`. |
 | `WHISPER_LANGUAGE` | auto-detect | Initial value of the voice-input selector (`en`/`de`). |

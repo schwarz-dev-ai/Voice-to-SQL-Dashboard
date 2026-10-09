@@ -53,10 +53,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "schema_header": "Database schema",
         "model_label": "Model: `{model}`",
         "no_api_key": (
-            "No `ANTHROPIC_API_KEY` in the environment. The SDK may still find "
-            "credentials from another source (e.g. an `ant auth login` profile)."
+            "No `{var}` in the environment. The SDK may still find credentials "
+            "from another source (e.g. an `ant auth login` profile)."
         ),
         "db_missing": "`{name}` was not found.",
+        "seeding": "Creating the database...",
+        "seeding_failed": "The database could not be created: {error}",
         "query_rejected": "Query rejected: {error}",
         "error_generic": "Something went wrong: {error}",
     },
@@ -98,10 +100,12 @@ STRINGS: dict[str, dict[str, str]] = {
         "schema_header": "Datenbank-Schema",
         "model_label": "Modell: `{model}`",
         "no_api_key": (
-            "Kein `ANTHROPIC_API_KEY` in der Umgebung. Das SDK findet eventuell "
-            "Zugangsdaten aus anderer Quelle (z. B. ein `ant auth login`-Profil)."
+            "Kein `{var}` in der Umgebung. Das SDK findet eventuell Zugangsdaten "
+            "aus anderer Quelle (z. B. ein `ant auth login`-Profil)."
         ),
         "db_missing": "`{name}` wurde nicht gefunden.",
+        "seeding": "Erstelle die Datenbank ...",
+        "seeding_failed": "Die Datenbank konnte nicht erstellt werden: {error}",
         "query_rejected": "Abfrage abgelehnt: {error}",
         "error_generic": "Etwas ist schiefgelaufen: {error}",
     },

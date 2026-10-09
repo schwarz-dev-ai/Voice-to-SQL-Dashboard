@@ -1,4 +1,16 @@
-"""Natural-language to SQL translation via the Anthropic Claude API."""
+"""Natural-language to SQL translation via a hosted LLM.
+
+Two providers sit behind one interface, both reached through their official SDK:
+
+- ``anthropic``  — Claude, via the Anthropic SDK.
+- ``openrouter`` — any OpenRouter model, via its OpenAI-compatible API. The OpenAI
+  SDK is pointed at OpenRouter's ``base_url``; nothing else about the call changes.
+
+Which one runs is resolved *per call* by :func:`active_provider`, never at import
+time. That matters for deployment: Streamlit Community Cloud hands secrets to
+``st.secrets``, and ``app.py`` copies them into the environment when it starts. If
+the provider were decided during import, the copy could land too late.
+"""
 
 from __future__ import annotations
 
@@ -8,11 +20,18 @@ import anthropic
 
 from db import strip_code_fences
 
-DEFAULT_MODEL = os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
+ANTHROPIC = "anthropic"
+OPENROUTER = "openrouter"
+PROVIDERS = (ANTHROPIC, OPENROUTER)
 
-# Effort trades reasoning depth against latency. Text-to-SQL with the schema in
-# context is a well-specified task, so "low" keeps the demo responsive.
-EFFORT = os.environ.get("CLAUDE_EFFORT", "low")
+OPENROUTER_BASE_URL = "https://openrouter.ai/api/v1"
+
+# OpenRouter attributes traffic through these headers; they are optional but make
+# the app show up as a named consumer in the dashboard.
+_OPENROUTER_HEADERS = {
+    "HTTP-Referer": "https://github.com/schwarz-dev-ai/Voice-to-SQL-Dashboard",
+    "X-Title": "Voice-to-SQL Dashboard",
+}
 
 SYSTEM_PROMPT = """You translate natural-language questions into a single, executable SQLite query.
 
@@ -40,30 +59,42 @@ Database schema:
 {schema}"""
 
 
-def build_client() -> anthropic.Anthropic:
-    """Create a client, resolving credentials from the environment."""
-    return anthropic.Anthropic()
+def active_provider() -> str:
+    """Return the provider to use for this call.
 
-
-def generate_sql(
-    question: str,
-    schema: str,
-    *,
-    client: anthropic.Anthropic | None = None,
-    model: str = DEFAULT_MODEL,
-) -> str:
-    """Ask Claude to translate ``question`` into SQL against ``schema``.
-
-    Returns the raw SQL string (markdown fences stripped defensively, in case the
-    model adds them anyway).
+    ``LLM_PROVIDER`` wins if set. Otherwise OpenRouter is chosen when its key is
+    present, since that is the deliberate choice of a deployment that has one;
+    everything else falls back to Anthropic.
     """
-    client = client or build_client()
+    requested = os.environ.get("LLM_PROVIDER", "").strip().lower()
+    if requested:
+        if requested not in PROVIDERS:
+            raise ValueError(
+                f"LLM_PROVIDER must be one of {PROVIDERS}, not '{requested}'."
+            )
+        return requested
+    return OPENROUTER if os.environ.get("OPENROUTER_API_KEY") else ANTHROPIC
 
+
+def active_model(provider: str | None = None) -> str:
+    """Return the model id for ``provider`` (default: the active one)."""
+    provider = provider or active_provider()
+    if provider == OPENROUTER:
+        return os.environ.get("OPENROUTER_MODEL", "deepseek/deepseek-v4.1-flash")
+    return os.environ.get("CLAUDE_MODEL", "claude-opus-5-5")
+
+
+def _ask_anthropic(system: str, question: str, model: str) -> str:
+    """Ask Claude, returning its raw text output."""
+    client = anthropic.Anthropic()
     response = client.messages.create(
         model=model,
         max_tokens=8192,
-        system=SYSTEM_PROMPT.format(schema=schema),
-        output_config={"effort": EFFORT},
+        system=system,
+        # Effort trades reasoning depth against latency. Text-to-SQL with the schema
+        # in context is a well-specified task, so "low" keeps the demo responsive.
+        # It is the only way to tune thinking depth here; budget_tokens is rejected.
+        output_config={"effort": os.environ.get("CLAUDE_EFFORT", "low")},
         messages=[{"role": "user", "content": question}],
     )
 
@@ -72,11 +103,74 @@ def generate_sql(
         raise RuntimeError(f"Claude declined to answer this question. {detail or ''}".strip())
 
     # Thinking blocks may be present alongside the text block, so collect text only.
-    text = "".join(
-        block.text for block in response.content if block.type == "text"
+    return "".join(block.text for block in response.content if block.type == "text")
+
+
+def _ask_openrouter(system: str, question: str, model: str) -> str:
+    """Ask an OpenRouter model through its OpenAI-compatible endpoint."""
+    api_key = os.environ.get("OPENROUTER_API_KEY")
+    if not api_key:
+        raise RuntimeError(
+            "OPENROUTER_API_KEY is not set. Add it to the environment, or to the "
+            "deployment's secrets."
+        )
+
+    try:
+        from openai import OpenAI
+    except ImportError as exc:  # pragma: no cover - depends on environment
+        raise RuntimeError(
+            "The openai package is required for the OpenRouter provider. "
+            "Run: pip install openai"
+        ) from exc
+
+    client = OpenAI(
+        base_url=OPENROUTER_BASE_URL,
+        api_key=api_key,
+        default_headers=_OPENROUTER_HEADERS,
+    )
+    response = client.chat.completions.create(
+        model=model,
+        max_tokens=8192,
+        # Greedy decoding: translating a question into SQL has one right answer, and
+        # a stable one makes the demo reproducible.
+        temperature=0.0,
+        messages=[
+            {"role": "system", "content": system},
+            {"role": "user", "content": question},
+        ],
     )
 
-    if not text.strip():
-        raise RuntimeError("Claude returned an empty response.")
+    choice = response.choices[0]
+    if choice.finish_reason == "length":
+        raise RuntimeError(
+            "The model hit its output limit before finishing the query. "
+            "Try a shorter question."
+        )
+    return choice.message.content or ""
 
-    return strip_code_fences(text)
+
+def generate_sql(
+    question: str,
+    schema: str,
+    *,
+    provider: str | None = None,
+    model: str | None = None,
+) -> str:
+    """Translate ``question`` into SQL against ``schema``.
+
+    Returns the raw SQL string, with markdown fences stripped defensively in case
+    the model adds them anyway.
+    """
+    provider = provider or active_provider()
+    model = model or active_model(provider)
+    system = SYSTEM_PROMPT.format(schema=schema)
+
+    if provider == OPENROUTER:
+        raw = _ask_openrouter(system, question, model)
+    else:
+        raw = _ask_anthropic(system, question, model)
+
+    if not raw.strip():
+        raise RuntimeError(f"{model} returned an empty response.")
+
+    return strip_code_fences(raw)
