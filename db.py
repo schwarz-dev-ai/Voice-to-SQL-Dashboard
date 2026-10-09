@@ -32,6 +32,19 @@ _FORBIDDEN_RE = re.compile(
 )
 
 
+# Columns whose distinct values are shown to the model alongside the schema.
+#
+# Without this the model has to guess how a value is spelled in the table, and it
+# guesses defensively: for a German "Schweiz" it writes
+# `WHERE country IN ('Switzerland', 'Schweiz', 'CH', 'Suisse')`. Telling it the
+# actual stored values lets it write a plain, correct equality instead. Register a
+# column here when its values are a small fixed set of categories.
+CATEGORICAL_COLUMNS: dict[str, tuple[str, ...]] = {
+    "customers": ("country",),
+    "products": ("category",),
+}
+
+
 class UnsafeQueryError(ValueError):
     """Raised when a generated query is not a single read-only SELECT."""
 
@@ -109,6 +122,20 @@ def get_schema_text(db_path: Path = DB_PATH) -> str:
                     notes.append("NOT NULL")
                 suffix = f"  -- {', '.join(notes)}" if notes else ""
                 lines.append(f"  {name} {col_type}{suffix}")
+
+            # Spell out the values a categorical column actually holds, so the
+            # model filters on them instead of guessing translations of them.
+            for column in CATEGORICAL_COLUMNS.get(table, ()):
+                values = [
+                    row[0]
+                    for row in conn.execute(
+                        f"SELECT DISTINCT {column} FROM {table} "
+                        f"WHERE {column} IS NOT NULL ORDER BY 1"
+                    )
+                ]
+                rendered = ", ".join(f"'{value}'" for value in values)
+                lines.append(f"  -- {column} holds exactly these values: {rendered}")
+
             lines.append("")
 
     return "\n".join(lines).strip()

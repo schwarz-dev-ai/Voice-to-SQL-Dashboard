@@ -27,6 +27,12 @@ Query rules:
 - Use only the tables and columns described in the schema below. Never invent names.
 - Use SQLite syntax, and prefer explicit JOINs with short table aliases.
 - When the question asks for a "top N" or "most/least", use ORDER BY with LIMIT.
+- When the question asks whether something exists or how many there are ("are there",
+  "is there", "how many", "gibt es", "wie viele"), return an aggregate such as
+  COUNT(*), not a list of matching rows.
+- When filtering a column whose allowed values are listed in the schema, compare
+  against exactly those values. Do not add translations, abbreviations or
+  alternative spellings of your own.
 - Give aggregated columns a clear alias, e.g. `SUM(price * quantity) AS total_revenue`.
 - Dates are stored as ISO-8601 text ("YYYY-MM-DD"), so string comparison and SQLite date functions both work.
 
